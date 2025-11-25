@@ -237,7 +237,9 @@ has_backports() {
     fi
 
     case $suite in
-        oldoldstable|bookworm|oldstable|trixie|stable|forky|testing) return
+        oldoldstable|bookworm|oldstable|trixie|stable|forky|testing)
+            return 0
+            ;;
     esac
 
     warn "No backports kernel is available for $suite"
