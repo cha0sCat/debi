@@ -109,6 +109,21 @@ set_mirror_proxy() {
     esac
 }
 
+# Determines if a suite is archived (End of Life)
+# Archived suites are no longer available on regular mirrors (deb.debian.org)
+# and must be accessed via archive.debian.org
+# This affects availability of backports and other repositories
+# Returns 0 if archived (EoL), 1 if still active
+is_archived_suite() {
+    case $suite in
+        buster|bullseye)
+            return 0
+            ;;
+        *)
+            return 1
+    esac
+}
+
 # Determines the security repository path format based on Debian suite
 # - Buster (Debian 10): Uses old format "buster/updates" 
 # - Bullseye onwards and testing: Uses new format "suite-security"
@@ -212,10 +227,17 @@ has_cloud_kernel() {
 # Backports provide newer versions of packages from testing/unstable rebuilt for stable releases
 # - All stable releases and testing: Have backports available
 # - Sid/unstable: No backports (already has the latest packages)
+# - Archived/EoL releases: Backports not available on regular mirrors
 # Returns 0 if available, 1 if not
 has_backports() {
+    # Archived suites don't have backports on regular mirrors
+    if is_archived_suite; then
+        warn "No backports available for $suite (archived/EoL release)"
+        return 1
+    fi
+
     case $suite in
-        buster|bullseye|oldoldstable|bookworm|oldstable|trixie|stable|forky|testing) return
+        oldoldstable|bookworm|oldstable|trixie|stable|forky|testing) return
     esac
 
     warn "No backports kernel is available for $suite"
@@ -542,6 +564,10 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+# Automatically disable backports for archived (EoL) suites
+# Backports are not available on regular mirrors for archived releases
+is_archived_suite && apt_backports=false
 
 [ -z "$architecture" ] && {
     architecture=$(dpkg --print-architecture 2> /dev/null) || {
