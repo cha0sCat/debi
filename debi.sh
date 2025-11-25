@@ -226,18 +226,12 @@ has_cloud_kernel() {
 # Checks if backports repository is available for the current suite
 # Backports provide newer versions of packages from testing/unstable rebuilt for stable releases
 # - All stable releases and testing: Have backports available
+# - Archived/EoL releases: Have backports on archive.debian.org
 # - Sid/unstable: No backports (already has the latest packages)
-# - Archived/EoL releases: Backports not available on regular mirrors
 # Returns 0 if available, 1 if not
 has_backports() {
-    # Archived suites don't have backports on regular mirrors
-    if is_archived_suite; then
-        warn "No backports available for $suite (archived/EoL release)"
-        return 1
-    fi
-
     case $suite in
-        oldoldstable|bookworm|oldstable|trixie|stable|forky|testing)
+        buster|bullseye|oldoldstable|bookworm|oldstable|trixie|stable|forky|testing)
             return 0
             ;;
     esac
@@ -567,9 +561,11 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-# Automatically disable backports for archived (EoL) suites
-# Backports are not available on regular mirrors for archived releases
-is_archived_suite && apt_backports=false
+# Automatically configure backports from archive.debian.org for archived (EoL) suites
+# since backports are not available on regular mirrors for archived releases
+# Set flag for later use in preseed configuration
+archived_backports=false
+is_archived_suite && archived_backports=true
 
 [ -z "$architecture" ] && {
     architecture=$(dpkg --print-architecture 2> /dev/null) || {
@@ -619,7 +615,9 @@ apt_components=main
 [ "$apt_non_free_firmware" = true ] && apt_components="$apt_components non-free-firmware"
 
 apt_services=updates
-[ "$apt_backports" = true ] && apt_services="$apt_services, backports"
+# For archived suites, don't let installer configure backports from the default mirror
+# (we'll add a custom entry pointing to archive.debian.org instead)
+[ "$apt_backports" = true ] && [ "$archived_backports" = false ] && apt_services="$apt_services, backports"
 
 installer_directory="/boot/debian-$suite"
 
@@ -900,6 +898,14 @@ EOF
     $save_preseed << EOF
 d-i apt-setup/local0/repository string $security_repository $security_archive $apt_components
 d-i apt-setup/local0/source boolean $apt_src
+EOF
+}
+
+# For archived (EoL) releases, configure backports from archive.debian.org
+[ "$apt_backports" = true ] && [ "$archived_backports" = true ] && {
+    $save_preseed << EOF
+d-i apt-setup/local1/repository string https://archive.debian.org/debian $suite-backports $apt_components
+d-i apt-setup/local1/source boolean $apt_src
 EOF
 }
 
