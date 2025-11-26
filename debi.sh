@@ -614,11 +614,6 @@ apt_components=main
 [ "$apt_non_free" = true ] && apt_components="$apt_components non-free"
 [ "$apt_non_free_firmware" = true ] && apt_components="$apt_components non-free-firmware"
 
-apt_services=updates
-# For archived suites, don't let installer configure backports from the default mirror
-# (we'll add a custom entry pointing to archive.debian.org instead)
-[ "$apt_backports" = true ] && [ "$archived_backports" = false ] && apt_services="$apt_services, backports"
-
 installer_directory="/boot/debian-$suite"
 
 save_preseed='cat'
@@ -881,6 +876,9 @@ EOF
 
 [ "$security_repository" = mirror ] && security_repository=$mirror_protocol://$mirror_host${mirror_directory%/*}/debian-security
 
+# APT services configuration - always only updates
+apt_services=updates
+
 $save_preseed << EOF
 
 # Apt setup
@@ -898,6 +896,15 @@ EOF
     $save_preseed << EOF
 d-i apt-setup/local0/repository string $security_repository $security_archive $apt_components
 d-i apt-setup/local0/source boolean $apt_src
+EOF
+}
+
+# Configure backports repository
+# For live (non-archived) releases, add local repo pointing to regular mirror
+[ "$apt_backports" = true ] && [ "$archived_backports" = false ] && {
+    $save_preseed << EOF
+d-i apt-setup/local1/repository string $mirror_protocol://$mirror_host$mirror_directory $suite-backports $apt_components
+d-i apt-setup/local1/source boolean $apt_src
 EOF
 }
 
