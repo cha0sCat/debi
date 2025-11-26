@@ -9,7 +9,7 @@ on:
 
 jobs:
   test-debi:
-    name: Test ${{ matrix.name }}
+    name: "Debian ${{ matrix.version }} | ${{ matrix.mirror }} | ethx:${{ matrix.ethx }} | user:${{ matrix.user }} | nc:${{ matrix.network_console }}"
     runs-on: ubuntu-22.04
     timeout-minutes: 45
 
@@ -19,38 +19,46 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: "Debian 11 with USTC mirror"
-            test_id: "debian11-ustc"
-            debian_version: "11"
-            args: "--version 11 --ustc --network-console --ethx --user root --password newpass123"
-            image_url: "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"
-            new_user: "root"
-            new_password: "newpass123"
-
-          - name: "Debian 12 with USTC mirror"
-            test_id: "debian12-ustc"
-            debian_version: "12"
-            args: "--version 12 --ustc --network-console --ethx --user root --password newpass123"
-            image_url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
-            new_user: "root"
-            new_password: "newpass123"
-
-          - name: "Debian 11 with default mirror"
-            test_id: "debian11-default"
-            debian_version: "11"
-            args: "--version 11 --network-console --user debian --password newpass123"
-            image_url: "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"
-            new_user: "debian"
-            new_password: "newpass123"
-
-          - name: "Debian 12 with Cloudflare"
-            test_id: "debian12-cloudflare"
-            debian_version: "12"
-            args: "--version 12 --cloudflare --network-console --ethx --user debian --password newpass123"
-            image_url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
-            new_user: "debian"
-            new_password: "newpass123"
+        # Target Debian version to install
+        version: [10, 11, 12]
+        # Mirror configuration
+        mirror: ['default', 'ustc', 'cloudflare']
+        # Network interface naming
+        ethx: [true, false]
+        # User to create
+        user: ['root', 'debian']
+        # Enable network console for remote installation
+        network_console: [true]
+        
+        # Exclude combinations to keep matrix manageable (~12 tests)
+        exclude:
+          # Debian 10 - only test with default mirror and root user
+          - version: 10
+            mirror: 'ustc'
+          - version: 10
+            mirror: 'cloudflare'
+          - version: 10
+            user: 'debian'
+          - version: 10
+            ethx: false
+          
+          # For Debian 11 & 12, test key combinations
+          # Skip debian user with ustc (redundant)
+          - version: 11
+            mirror: 'ustc'
+            user: 'debian'
+          - version: 12
+            mirror: 'ustc'
+            user: 'debian'
+          
+          # Skip cloudflare without ethx (less common)
+          - mirror: 'cloudflare'
+            ethx: false
+          
+          # Skip default mirror without ethx for Debian 12
+          - version: 12
+            mirror: 'default'
+            ethx: false
 
     steps:
       - name: Checkout repository
@@ -62,6 +70,14 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      - name: Cache APT packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-apt-${{ hashFiles('.github/workflows/test.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-apt-
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -72,13 +88,23 @@ jobs:
           ls -la /dev/kvm
           kvm-ok || true
 
-      - name: Download Debian cloud image
+      - name: Cache Debian cloud image
+        id: cache-debian-image
+        uses: actions/cache@v4
+        with:
+          path: /tmp/debian-11-base.qcow2
+          key: debian-11-cloud-image-${{ hashFiles('.github/workflows/test.yml') }}
+          restore-keys: |
+            debian-11-cloud-image-
+
+      - name: Download Debian 11 cloud image
+        if: steps.cache-debian-image.outputs.cache-hit != 'true'
         run: |
-          wget -O /tmp/debian-base.qcow2 "${{ matrix.image_url }}"
+          wget -O /tmp/debian-11-base.qcow2 "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"
 
       - name: Create working disk image
         run: |
-          qemu-img create -f qcow2 -F qcow2 -b /tmp/debian-base.qcow2 /tmp/test-disk.qcow2 20G
+          qemu-img create -f qcow2 -F qcow2 -b /tmp/debian-11-base.qcow2 /tmp/test-disk.qcow2 20G
           qemu-img resize /tmp/test-disk.qcow2 20G
 
       - name: Create cloud-init configuration
@@ -158,14 +184,44 @@ jobs:
           sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
             'chmod +x /root/debi.sh'
 
+      - name: Build debi.sh arguments from matrix parameters
+        id: build-args
+        run: |
+          # Start with version
+          ARGS="--version ${{ matrix.version }}"
+          
+          # Add mirror flag
+          if [ "${{ matrix.mirror }}" = "ustc" ]; then
+            ARGS="$ARGS --ustc"
+          elif [ "${{ matrix.mirror }}" = "cloudflare" ]; then
+            ARGS="$ARGS --cloudflare"
+          fi
+          # default mirror doesn't need a flag
+          
+          # Add ethx flag
+          if [ "${{ matrix.ethx }}" = "true" ]; then
+            ARGS="$ARGS --ethx"
+          fi
+          
+          # Add network-console flag
+          if [ "${{ matrix.network_console }}" = "true" ]; then
+            ARGS="$ARGS --network-console"
+          fi
+          
+          # Add user and password
+          ARGS="$ARGS --user ${{ matrix.user }} --password newpass123"
+          
+          echo "args=$ARGS" >> $GITHUB_OUTPUT
+          echo "Generated arguments: $ARGS"
+
       - name: Run debi.sh with test arguments
         run: |
-          echo "Running debi.sh with arguments: ${{ matrix.args }}"
+          echo "Running debi.sh with arguments: ${{ steps.build-args.outputs.args }}"
 
           # Run the script with a pseudo-TTY to handle stty commands
           # Use 'script' command to provide a PTY for non-interactive SSH
           sshpass -p 'rootpass123' ssh -t -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
-            "script -q -c 'cd /root && ./debi.sh ${{ matrix.args }}' /tmp/debi-output.log; echo \"Script exit code: \$?\" >> /tmp/debi-output.log" || echo "Script execution finished with non-zero exit code, will validate via file checks"
+            "script -q -c 'cd /root && ./debi.sh ${{ steps.build-args.outputs.args }}' /tmp/debi-output.log; echo \"Script exit code: \$?\" >> /tmp/debi-output.log" || echo "Script execution finished with non-zero exit code, will validate via file checks"
 
       - name: Download and check debi.sh output
         run: |
@@ -252,7 +308,7 @@ jobs:
             echo "Attempt at ${ELAPSED}s: Trying to connect with new credentials..."
             
             # Try to connect with the NEW password (set by debi.sh installation)
-            if sshpass -p '${{ matrix.new_password }}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -p 2222 ${{ matrix.new_user }}@localhost 'echo "NEW SYSTEM CONNECTED!"' 2>/dev/null; then
+            if sshpass -p 'newpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -p 2222 ${{ matrix.user }}@localhost 'echo "NEW SYSTEM CONNECTED!"' 2>/dev/null; then
               echo "✓ Successfully connected to newly installed system!"
               echo "✓ Installation completed successfully!"
               exit 0
@@ -275,7 +331,7 @@ jobs:
           echo "Verifying the newly installed Debian system..."
           
           # Connect with new credentials and verify system
-          sshpass -p '${{ matrix.new_password }}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 ${{ matrix.new_user }}@localhost << 'VERIFY_EOF'
+          sshpass -p 'newpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 ${{ matrix.user }}@localhost << 'VERIFY_EOF'
           echo "=== System Information ==="
           uname -a
           
@@ -314,14 +370,14 @@ jobs:
             'journalctl -n 100' 2>/dev/null || echo "Could not connect with old credentials"
 
           echo "=== Trying to connect with new credentials ==="
-          sshpass -p '${{ matrix.new_password }}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -p 2222 ${{ matrix.new_user }}@localhost \
+          sshpass -p 'newpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -p 2222 ${{ matrix.user }}@localhost \
             'journalctl -n 100' 2>/dev/null || echo "Could not connect with new credentials"
 
       - name: Shutdown VM
         if: always()
         run: |
           # Try graceful shutdown with new credentials first (if new system is installed)
-          sshpass -p '${{ matrix.new_password }}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -p 2222 ${{ matrix.new_user }}@localhost \
+          sshpass -p 'newpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -p 2222 ${{ matrix.user }}@localhost \
             'sudo poweroff' 2>/dev/null || true
           
           # Also try with old credentials (if still on old system)
@@ -337,7 +393,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-logs-${{ matrix.test_id }}
+          name: test-logs-v${{ matrix.version }}-${{ matrix.mirror }}-ethx${{ matrix.ethx }}-${{ matrix.user }}-nc${{ matrix.network_console }}
           path: |
             /tmp/debi-output.log
             /tmp/serial.log

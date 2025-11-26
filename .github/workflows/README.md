@@ -6,43 +6,61 @@ This workflow tests the Debian Network Reinstall Script (`debi.sh`) using KVM vi
 
 ## Test Matrix
 
-The workflow tests multiple configurations:
+The workflow uses a semantic matrix strategy to test ~15 different configurations across:
 
-1. **Debian 11 with USTC mirror** - Chinese mirror with ethx naming
-2. **Debian 12 with USTC mirror** - Chinese mirror with ethx naming
-3. **Debian 11 with default mirror** - Global mirror with DHCP
-4. **Debian 12 with Cloudflare** - Cloudflare DNS with ethx naming
+- **Debian Versions**: 10 (Buster), 11 (Bullseye), 12 (Bookworm)
+- **Mirrors**: Default, USTC (China), Cloudflare
+- **Network Interface Naming**: Standard (`ethx`) or predictable names
+- **User Account**: `root` or `debian`
+- **Network Console**: Always enabled for remote installation monitoring
+
+**Key combinations tested:**
+- Debian 10 with default mirror (baseline)
+- Debian 11 with all mirrors and both naming schemes
+- Debian 12 with all mirrors and various user configurations
+
+**Base Image**: All tests use Debian 11 (Bullseye) cloud image as the starting point, regardless of target version.
 
 ## How It Works
 
 ### 1. Environment Setup
 - Enables KVM support on GitHub Actions runner
-- Installs QEMU and related tools
-- Downloads official Debian cloud images
+- Caches APT packages for faster subsequent runs
+- Installs QEMU and related tools (qemu-kvm, cloud-utils, sshpass, etc.)
 
-### 2. VM Preparation
-- Creates a copy-on-write disk image from the base cloud image
+### 2. Base Image Caching
+- Downloads Debian 11 cloud image (only once, then cached)
+- Reuses cached image across all matrix jobs
+- Significantly speeds up workflow execution
+
+### 3. VM Preparation
+- Creates a copy-on-write disk image from the cached base image
 - Generates cloud-init configuration for initial VM setup
 - Configures root SSH access with password `rootpass123`
 
-### 3. VM Execution
+### 4. VM Execution
 - Starts QEMU VM with KVM acceleration
 - Waits for SSH to become available
 - Uploads `debi.sh` script to the VM
 
-### 4. Script Testing
-- Executes `debi.sh` with matrix-specific arguments
-- Each test uses a new password (`newpass123`) for the installed system
+### 5. Script Testing
+- **Builds arguments dynamically** from matrix parameters:
+  - `--version` from `matrix.version`
+  - `--ustc` or `--cloudflare` from `matrix.mirror`
+  - `--ethx` from `matrix.ethx`
+  - `--network-console` (always enabled)
+  - `--user` and `--password` from `matrix.user`
+- Executes `debi.sh` with built arguments
 - Captures output for debugging
 
-### 5. Installation Validation
+### 6. Installation Validation
 The workflow validates that the script:
 - Successfully downloads Debian installer components to `/boot/debian-*/`
 - Creates the required `linux` and `initrd.gz` files
 - Updates GRUB configuration with Debian Installer entry
 - Sets GRUB default to boot into the installer
 
-### 6. Full Installation Test
+### 7. Full Installation Test
 After validation, the workflow:
 - Reboots the VM to start the Debian installer
 - Waits for the installation to complete (up to 30 minutes)
@@ -136,29 +154,40 @@ This workflow tests the complete installation process:
 
 Note: Full installation takes 10-30 minutes per test case.
 
-## Security Note
+## Performance Optimization
 
-The workflow uses hardcoded passwords for test VMs. This is acceptable because:
-- VMs are ephemeral (created and destroyed during workflow execution)
-- VMs run only on the GitHub Actions runner (not publicly accessible)
-- SSH port forwarding is local to the runner only
-- All test VMs are destroyed after the workflow completes
+The workflow includes several optimizations:
 
-These passwords are not used for any production systems.
+1. **APT Package Caching**: Dependencies are cached across workflow runs
+2. **Base Image Caching**: Debian 11 cloud image is downloaded once and reused
+3. **Single Base Image**: All tests use Debian 11 as starting point (smaller cache footprint)
+4. **Matrix Exclusions**: Intelligent filtering reduces redundant test combinations
 
 ## Adding New Test Cases
 
-To add a new test configuration:
+The workflow uses a semantic matrix. To modify test coverage:
 
+**Add a new Debian version:**
 ```yaml
-- name: "Your test description"
-  test_id: "unique-test-id"
-  debian_version: "12"
-  args: "--version 12 --your --custom --args --user root --password newpass123"
-  image_url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
-  new_user: "root"
-  new_password: "newpass123"
+matrix:
+  version: [10, 11, 12, 13]  # Add 13
 ```
+
+**Test with a new mirror:**
+```yaml
+matrix:
+  mirror: ['default', 'ustc', 'cloudflare', 'tuna']  # Add tuna
+```
+
+**Modify exclusions:**
+```yaml
+exclude:
+  # Add exclusions to prevent unwanted combinations
+  - version: 13
+    mirror: 'ustc'  # Skip USTC for Debian 13
+```
+
+The workflow automatically builds command-line arguments from matrix parameters.
 
 ## Troubleshooting
 
@@ -179,3 +208,11 @@ If the installation takes too long:
 - Check the serial console for progress
 - Verify mirror connectivity
 - Consider using a faster mirror (USTC, Cloudflare)
+
+### Cache issues
+To clear caches and force fresh downloads:
+1. Go to Actions tab → Caches
+2. Delete relevant cache entries
+3. Re-run the workflow
+
+Cache keys are based on workflow file hash, so modifying the workflow automatically invalidates caches.
