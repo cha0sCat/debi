@@ -106,12 +106,12 @@ jobs:
 
       - name: Start VM and wait for boot
         run: |
-          # Start QEMU in background with serial console redirected
+          # Start QEMU in background (daemonize mode doesn't support -nographic)
           sudo qemu-system-x86_64 \
             -machine type=pc,accel=kvm \
             -cpu host \
             -m 2048 \
-            -nographic \
+            -display none \
             -drive file=/tmp/test-disk.qcow2,format=qcow2,if=virtio \
             -cdrom /tmp/cloud-init.iso \
             -net nic,model=virtio \
