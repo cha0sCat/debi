@@ -11,7 +11,7 @@ jobs:
   test-debi:
     name: Test ${{ matrix.name }}
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 45
 
     permissions:
       contents: read
@@ -23,26 +23,34 @@ jobs:
           - name: "Debian 11 with USTC mirror"
             test_id: "debian11-ustc"
             debian_version: "11"
-            args: "--version 11 --ustc --network-console --ethx --user root --password testpass123 --static-ipv4"
+            args: "--version 11 --ustc --network-console --ethx --user root --password newpass123"
             image_url: "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"
+            new_user: "root"
+            new_password: "newpass123"
 
           - name: "Debian 12 with USTC mirror"
             test_id: "debian12-ustc"
             debian_version: "12"
-            args: "--version 12 --ustc --network-console --ethx --user root --password testpass123 --static-ipv4"
+            args: "--version 12 --ustc --network-console --ethx --user root --password newpass123"
             image_url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
+            new_user: "root"
+            new_password: "newpass123"
 
           - name: "Debian 11 with default mirror"
             test_id: "debian11-default"
             debian_version: "11"
-            args: "--version 11 --network-console --user debian --password testpass123"
+            args: "--version 11 --network-console --user debian --password newpass123"
             image_url: "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"
+            new_user: "debian"
+            new_password: "newpass123"
 
           - name: "Debian 12 with Cloudflare"
             test_id: "debian12-cloudflare"
             debian_version: "12"
-            args: "--version 12 --cloudflare --network-console --ethx --user debian --password testpass123"
+            args: "--version 12 --cloudflare --network-console --ethx --user debian --password newpass123"
             image_url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
+            new_user: "debian"
+            new_password: "newpass123"
 
     steps:
       - name: Checkout repository
@@ -205,16 +213,95 @@ jobs:
           echo "✓ GRUB configuration updated"
           echo "✓ System ready for reboot into Debian installer"
 
-      - name: Test reboot into installer (dry run)
+      - name: Reboot into Debian installer
         run: |
-          # Check default boot entry
-          echo "Checking GRUB default entry..."
+          echo "Rebooting VM to start Debian installation..."
+          
+          # Trigger reboot - the system should boot into Debian installer
           sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
-            'grep GRUB_DEFAULT /etc/default/grub.d/zz-debi.cfg'
+            'reboot' 2>/dev/null || true
+          
+          echo "Reboot command sent. VM will now boot into Debian installer."
+          echo "The installation process will take several minutes..."
 
-          # Verify the system is configured to boot into Debian installer on next reboot
-          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
-            'grub-editenv list || true'
+      - name: Wait for Debian installation to complete
+        run: |
+          echo "Waiting for Debian installation to complete..."
+          echo "This typically takes 10-20 minutes depending on network speed and mirror."
+          echo "The installer will automatically reboot after completion."
+          
+          # Wait for the old system to go down
+          sleep 30
+          
+          # The installation process:
+          # 1. VM boots into Debian installer (netboot)
+          # 2. Installer runs unattended using preseed configuration
+          # 3. System installs packages from mirror
+          # 4. System reboots into newly installed Debian
+          
+          # We'll poll for SSH availability with the NEW password
+          # This indicates the new system has been installed and booted
+          
+          MAX_WAIT=1800  # 30 minutes maximum wait
+          POLL_INTERVAL=30
+          ELAPSED=0
+          
+          echo "Polling for new system availability (max wait: ${MAX_WAIT}s)..."
+          
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            echo "Attempt at ${ELAPSED}s: Trying to connect with new credentials..."
+            
+            # Try to connect with the NEW password (set by debi.sh installation)
+            if sshpass -p '${{ matrix.new_password }}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -p 2222 ${{ matrix.new_user }}@localhost 'echo "NEW SYSTEM CONNECTED!"' 2>/dev/null; then
+              echo "✓ Successfully connected to newly installed system!"
+              echo "✓ Installation completed successfully!"
+              exit 0
+            fi
+            
+            # Also check if old system is still responding (installation not started yet)
+            if sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -p 2222 root@localhost 'echo "old system"' 2>/dev/null; then
+              echo "  Old system still responding - installation may not have started"
+            fi
+            
+            sleep $POLL_INTERVAL
+            ELAPSED=$((ELAPSED + POLL_INTERVAL))
+          done
+          
+          echo "✗ Timeout: Could not connect to new system after ${MAX_WAIT}s"
+          exit 1
+
+      - name: Verify new system installation
+        run: |
+          echo "Verifying the newly installed Debian system..."
+          
+          # Connect with new credentials and verify system
+          sshpass -p '${{ matrix.new_password }}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 ${{ matrix.new_user }}@localhost << 'VERIFY_EOF'
+          echo "=== System Information ==="
+          uname -a
+          
+          echo ""
+          echo "=== OS Release ==="
+          cat /etc/os-release
+          
+          echo ""
+          echo "=== Disk Usage ==="
+          df -h
+          
+          echo ""
+          echo "=== Memory Info ==="
+          free -h
+          
+          echo ""
+          echo "=== Network Configuration ==="
+          ip addr show
+          
+          echo ""
+          echo "=== Hostname ==="
+          hostname
+          
+          echo ""
+          echo "✓ New Debian system is running successfully!"
+          VERIFY_EOF
 
       - name: Collect debug information on failure
         if: failure()
@@ -222,19 +309,23 @@ jobs:
           echo "=== Serial console log ==="
           cat /tmp/serial.log || echo "No serial log available"
 
-          echo "=== SSH attempt to get system logs ==="
-          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
-            'journalctl -n 100' 2>/dev/null || echo "Could not retrieve logs"
+          echo "=== Trying to connect with old credentials ==="
+          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -p 2222 root@localhost \
+            'journalctl -n 100' 2>/dev/null || echo "Could not connect with old credentials"
 
-          echo "=== Disk usage ==="
-          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
-            'df -h' 2>/dev/null || echo "Could not retrieve disk usage"
+          echo "=== Trying to connect with new credentials ==="
+          sshpass -p '${{ matrix.new_password }}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -p 2222 ${{ matrix.new_user }}@localhost \
+            'journalctl -n 100' 2>/dev/null || echo "Could not connect with new credentials"
 
       - name: Shutdown VM
         if: always()
         run: |
-          # Try graceful shutdown first
-          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
+          # Try graceful shutdown with new credentials first (if new system is installed)
+          sshpass -p '${{ matrix.new_password }}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -p 2222 ${{ matrix.new_user }}@localhost \
+            'sudo poweroff' 2>/dev/null || true
+          
+          # Also try with old credentials (if still on old system)
+          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -p 2222 root@localhost \
             'poweroff' 2>/dev/null || true
 
           sleep 5
