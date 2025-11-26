@@ -900,6 +900,8 @@ EOF
 }
 
 # Configure backports repository
+# Note: archived_backports is either true or false (set based on is_archived_suite)
+# so the following two conditions are mutually exclusive
 # For live (non-archived) releases, add local repo pointing to regular mirror
 [ "$apt_backports" = true ] && [ "$archived_backports" = false ] && {
     $save_preseed << EOF
