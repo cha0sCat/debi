@@ -111,6 +111,16 @@ Testing the full installation would require:
 - Automated installer interaction
 - Significantly longer execution time (30+ minutes)
 
+## Security Note
+
+The workflow uses hardcoded passwords (`testpass123`, `rootpass123`) for test VMs. This is acceptable because:
+- VMs are ephemeral (created and destroyed during workflow execution)
+- VMs run only on the GitHub Actions runner (not publicly accessible)
+- SSH port forwarding is local to the runner only
+- All test VMs are destroyed after the workflow completes
+
+These passwords are not used for any production systems.
+
 ## Adding New Test Cases
 
 To add a new test configuration:

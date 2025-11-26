@@ -144,9 +144,9 @@ jobs:
         run: |
           echo "Running debi.sh with arguments: ${{ matrix.args }}"
 
-          # Run the script and capture output
+          # Run the script and capture output (allow non-zero exit for now, we'll validate via file checks)
           sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
-            "cd /root && ./debi.sh ${{ matrix.args }} 2>&1 | tee /tmp/debi-output.log" || true
+            "cd /root && ./debi.sh ${{ matrix.args }} 2>&1 | tee /tmp/debi-output.log; echo \"Script exit code: \$?\" >> /tmp/debi-output.log" || echo "Script execution finished with non-zero exit code, will validate via file checks"
 
       - name: Download and check debi.sh output
         run: |
