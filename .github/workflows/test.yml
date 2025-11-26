@@ -1,0 +1,242 @@
+name: Test Debian Installation Script
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+jobs:
+  test-debi:
+    name: Test ${{ matrix.name }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Debian 11 with USTC mirror"
+            debian_version: "11"
+            args: "--version 11 --ustc --network-console --ethx --user root --password testpass123 --static-ipv4"
+            image_url: "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"
+
+          - name: "Debian 12 with USTC mirror"
+            debian_version: "12"
+            args: "--version 12 --ustc --network-console --ethx --user root --password testpass123 --static-ipv4"
+            image_url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
+
+          - name: "Debian 11 with default mirror"
+            debian_version: "11"
+            args: "--version 11 --network-console --user debian --password testpass123"
+            image_url: "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"
+
+          - name: "Debian 12 with Cloudflare"
+            debian_version: "12"
+            args: "--version 12 --cloudflare --network-console --ethx --user debian --password testpass123"
+            image_url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-kvm qemu-utils cloud-image-utils genisoimage expect sshpass
+
+      - name: Check KVM availability
+        run: |
+          ls -la /dev/kvm
+          kvm-ok || true
+
+      - name: Download Debian cloud image
+        run: |
+          wget -O /tmp/debian-base.qcow2 "${{ matrix.image_url }}"
+
+      - name: Create working disk image
+        run: |
+          qemu-img create -f qcow2 -F qcow2 -b /tmp/debian-base.qcow2 /tmp/test-disk.qcow2 20G
+          qemu-img resize /tmp/test-disk.qcow2 20G
+
+      - name: Create cloud-init configuration
+        run: |
+          mkdir -p /tmp/cloud-init
+
+          # meta-data
+          cat > /tmp/cloud-init/meta-data << 'EOF'
+          instance-id: test-debi-vm
+          local-hostname: test-debi
+          EOF
+
+          # user-data with root access
+          cat > /tmp/cloud-init/user-data << 'EOF'
+          #cloud-config
+          users:
+            - name: root
+              lock_passwd: false
+              plain_text_passwd: 'rootpass123'
+
+          ssh_pwauth: true
+          disable_root: false
+
+          packages:
+            - wget
+            - curl
+
+          runcmd:
+            - sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+            - systemctl restart sshd
+          EOF
+
+          # Create ISO for cloud-init
+          genisoimage -output /tmp/cloud-init.iso \
+            -volid cidata -rational-rock -joliet \
+            /tmp/cloud-init/user-data /tmp/cloud-init/meta-data
+
+      - name: Start VM and wait for boot
+        run: |
+          # Start QEMU in background with serial console redirected
+          sudo qemu-system-x86_64 \
+            -machine type=pc,accel=kvm \
+            -cpu host \
+            -m 2048 \
+            -nographic \
+            -drive file=/tmp/test-disk.qcow2,format=qcow2,if=virtio \
+            -cdrom /tmp/cloud-init.iso \
+            -net nic,model=virtio \
+            -net user,hostfwd=tcp::2222-:22 \
+            -serial file:/tmp/serial.log \
+            -monitor unix:/tmp/qemu-monitor.sock,server,nowait \
+            -daemonize
+
+          echo "Waiting for VM to boot and SSH to become available..."
+          for i in {1..60}; do
+            if sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost 'echo SSH ready' 2>/dev/null; then
+              echo "SSH is ready!"
+              break
+            fi
+            echo "Attempt $i/60: Waiting for SSH..."
+            sleep 5
+          done
+
+          # Verify SSH is working
+          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost 'uname -a'
+
+      - name: Upload debi.sh to VM
+        run: |
+          sshpass -p 'rootpass123' scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P 2222 \
+            ./debi.sh root@localhost:/root/debi.sh
+
+      - name: Make script executable
+        run: |
+          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
+            'chmod +x /root/debi.sh'
+
+      - name: Run debi.sh with test arguments
+        run: |
+          echo "Running debi.sh with arguments: ${{ matrix.args }}"
+
+          # Run the script and capture output
+          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
+            "cd /root && ./debi.sh ${{ matrix.args }} 2>&1 | tee /tmp/debi-output.log" || true
+
+      - name: Download and check debi.sh output
+        run: |
+          sshpass -p 'rootpass123' scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P 2222 \
+            root@localhost:/tmp/debi-output.log /tmp/debi-output.log || echo "Could not download output log"
+
+          if [ -f /tmp/debi-output.log ]; then
+            echo "=== debi.sh output ==="
+            cat /tmp/debi-output.log
+            echo "======================"
+          fi
+
+      - name: Verify installation preparation
+        run: |
+          echo "Checking if Debian installer files were downloaded..."
+
+          # Check if installer directory was created
+          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
+            'ls -la /boot/debian-* || echo "No installer directory found"'
+
+          # Check for installer components
+          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
+            'ls -lh /boot/debian-*/linux /boot/debian-*/initrd.gz 2>/dev/null || echo "Installer files not found"'
+
+          # Check GRUB configuration
+          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
+            'cat /etc/default/grub.d/zz-debi.cfg 2>/dev/null || echo "GRUB config not found"'
+
+          # Check if GRUB was updated with installer entry
+          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
+            'grep -A 5 "Debian Installer" /boot/grub/grub.cfg || echo "Debian Installer entry not found in GRUB"'
+
+      - name: Validate installation files exist
+        run: |
+          # Verify key files exist
+          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
+            'test -f /boot/debian-*/linux && test -f /boot/debian-*/initrd.gz && echo "Installation files verified!" || exit 1'
+
+          # Verify GRUB config was updated
+          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
+            'grep -q "Debian Installer" /boot/grub/grub.cfg && echo "GRUB config verified!" || exit 1'
+
+          echo "✓ Script execution completed successfully"
+          echo "✓ Installer files downloaded"
+          echo "✓ GRUB configuration updated"
+          echo "✓ System ready for reboot into Debian installer"
+
+      - name: Test reboot into installer (dry run)
+        run: |
+          # Check default boot entry
+          echo "Checking GRUB default entry..."
+          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
+            'grep GRUB_DEFAULT /etc/default/grub.d/zz-debi.cfg'
+
+          # Verify the system is configured to boot into Debian installer on next reboot
+          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
+            'grub-editenv list || true'
+
+      - name: Collect debug information on failure
+        if: failure()
+        run: |
+          echo "=== Serial console log ==="
+          cat /tmp/serial.log || echo "No serial log available"
+
+          echo "=== SSH attempt to get system logs ==="
+          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
+            'journalctl -n 100' 2>/dev/null || echo "Could not retrieve logs"
+
+          echo "=== Disk usage ==="
+          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
+            'df -h' 2>/dev/null || echo "Could not retrieve disk usage"
+
+      - name: Shutdown VM
+        if: always()
+        run: |
+          # Try graceful shutdown first
+          sshpass -p 'rootpass123' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 root@localhost \
+            'poweroff' 2>/dev/null || true
+
+          sleep 5
+
+          # Force kill QEMU if still running
+          sudo pkill qemu-system-x86_64 || true
+
+      - name: Upload logs as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.debian_version }}-${{ github.run_number }}
+          path: |
+            /tmp/debi-output.log
+            /tmp/serial.log
+          if-no-files-found: warn
