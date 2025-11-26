@@ -21,21 +21,25 @@ jobs:
       matrix:
         include:
           - name: "Debian 11 with USTC mirror"
+            test_id: "debian11-ustc"
             debian_version: "11"
             args: "--version 11 --ustc --network-console --ethx --user root --password testpass123 --static-ipv4"
             image_url: "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"
 
           - name: "Debian 12 with USTC mirror"
+            test_id: "debian12-ustc"
             debian_version: "12"
             args: "--version 12 --ustc --network-console --ethx --user root --password testpass123 --static-ipv4"
             image_url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
 
           - name: "Debian 11 with default mirror"
+            test_id: "debian11-default"
             debian_version: "11"
             args: "--version 11 --network-console --user debian --password testpass123"
             image_url: "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"
 
           - name: "Debian 12 with Cloudflare"
+            test_id: "debian12-cloudflare"
             debian_version: "12"
             args: "--version 12 --cloudflare --network-console --ethx --user debian --password testpass123"
             image_url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
@@ -119,6 +123,9 @@ jobs:
             -serial file:/tmp/serial.log \
             -monitor unix:/tmp/qemu-monitor.sock,server,nowait \
             -daemonize
+
+          # Fix permissions on serial.log so it can be uploaded as artifact
+          sudo chmod 644 /tmp/serial.log
 
           echo "Waiting for VM to boot and SSH to become available..."
           for i in {1..60}; do
@@ -238,7 +245,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-logs-${{ matrix.debian_version }}-${{ github.run_number }}
+          name: test-logs-${{ matrix.test_id }}
           path: |
             /tmp/debi-output.log
             /tmp/serial.log
