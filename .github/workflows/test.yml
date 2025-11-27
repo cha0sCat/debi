@@ -72,16 +72,31 @@ jobs:
 
       - name: Cache APT packages
         uses: actions/cache@v4
+        id: cache-apt
         with:
-          path: /var/cache/apt/archives
+          path: ~/apt-cache
           key: ${{ runner.os }}-apt-${{ hashFiles('.github/workflows/test.yml') }}
           restore-keys: |
             ${{ runner.os }}-apt-
+
+      - name: Restore APT cache
+        if: steps.cache-apt.outputs.cache-hit == 'true'
+        run: |
+          if [ -d ~/apt-cache ] && [ "$(ls -A ~/apt-cache 2>/dev/null)" ]; then
+            sudo cp ~/apt-cache/*.deb /var/cache/apt/archives/ 2>/dev/null || true
+          fi
 
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-kvm qemu-utils cloud-image-utils genisoimage expect sshpass
+
+      - name: Save APT cache
+        if: steps.cache-apt.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/apt-cache
+          sudo cp /var/cache/apt/archives/*.deb ~/apt-cache/ 2>/dev/null || true
+          sudo chown -R $USER:$USER ~/apt-cache
 
       - name: Check KVM availability
         run: |
